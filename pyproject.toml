@@ -1,0 +1,16 @@
+[project]
+name = "miniagent"
+version = "0.1.0"
+description = "A minimal from-scratch coding agent (Claude Code-style loop) with pluggable OpenAI-compatible providers: BigModel, OpenRouter, NVIDIA, Gemini, Groq, DeepSeek..."
+requires-python = ">=3.10"
+dependencies = ["openai>=1.40"]
+
+[project.scripts]
+miniagent = "miniagent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["miniagent"]

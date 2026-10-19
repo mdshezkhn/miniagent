@@ -1,0 +1,317 @@
+"""Tools — the agent's hands.
+
+An agent is only as capable as its tools. Note the design choices, they
+are the ones Claude Code / OpenHands make too:
+
+  * FEW, ORTHOGONAL TOOLS. Six tools cover most coding work. The model
+    picks tools from their JSON-schema descriptions — clear descriptions
+    matter more than quantity.
+  * RESULTS ARE ALWAYS STRINGS. Including errors ("Error: ..."). The
+    agent reads the error and self-corrects on the next turn — that is
+    THE core agent superpower, so never raise exceptions past execute().
+  * OUTPUT CAPS. LLM context is finite; a tool that dumps 5MB will wreck
+    the loop. `clip()` keeps head+tail, the way real agents do.
+  * SAFETY GATES. Two layers: a hard blocklist for catastrophic commands,
+    and a soft confirm() for anything that mutates state. --auto/--yolo
+    skips the soft layer (CI mode), never the hard one.
+"""
+
+import fnmatch
+import json
+import os
+import re
+import subprocess
+from pathlib import Path
+
+MAX_OUTPUT = 20_000   # chars per tool result fed back to the model
+CONFIRMABLE_ACTIONS = ("run_bash", "write_file")
+
+# Commands that are refused outright, whatever the model says.
+DANGEROUS_PATTERNS = [
+    r"rm\s+-rf\s+[/~]",            # rm -rf / or ~
+    r"\bmkfs(\.\w+)?\b",           # format filesystem
+    r"dd\s+if=.*of=/dev/",         # raw device writes
+    r":\(\)\s*\{.*\}\s*;\s*:",     # fork bomb
+    r"\bshutdown\b|\breboot\b",    # power actions
+    r"\bdel\s+/[sqf]\b",           # windows force-delete
+    r"\bformat\s+[a-z]:",          # windows format
+    r"git\s+push\s+(-f|--force)\s+origin\s+(main|master)\b",
+]
+_DANGEROUS = [re.compile(p, re.IGNORECASE) for p in DANGEROUS_PATTERNS]
+
+# Directories never entered while searching.
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build", ".idea"}
+
+
+class ToolContext:
+    """Everything tools need to know about the outside world.
+
+    confirm/ask are injected by the CLI, so tools stay UI-independent —
+    swap input() for a GUI dialog later without touching this file.
+    """
+
+    def __init__(self, cwd: str, confirm, ask):
+        self.cwd = cwd
+        self.confirm = confirm      # confirm(prompt: str) -> bool
+        self.ask = ask              # ask(question: str) -> str
+
+
+def clip(text: str, limit: int = MAX_OUTPUT) -> str:
+    """Cap tool output, keeping head and tail (the middle matters least)."""
+    if len(text) <= limit:
+        return text
+    head, tail = limit * 3 // 4, limit // 4
+    return (text[:head]
+            + f"\n... [{len(text) - head - tail} characters truncated] ...\n"
+            + text[-tail:])
+
+
+def _resolve(path: str, ctx: ToolContext) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else Path(ctx.cwd) / p
+
+
+# ====================================================================== #
+#  TOOL SCHEMAS — what the model sees. Descriptions are prompts!         #
+# ====================================================================== #
+
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_bash",
+            "description": ("Execute a shell command and return exit code, stdout and "
+                            "stderr. Use for builds, git, package installs, counting, "
+                            "one-off analysis. Prefer non-destructive commands; risky "
+                            "commands require user approval."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The command line to run"},
+                    "timeout": {"type": "integer", "description": "Seconds to wait (default 60, max 600)"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": ("Read a text file, returning lines numbered like '12->content'. "
+                            "Use offset/limit for large files."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path, relative to working dir or absolute"},
+                    "offset": {"type": "integer", "description": "1-based line to start from"},
+                    "limit": {"type": "integer", "description": "Max lines to return (default 2000)"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": ("Create or overwrite a text file. Parent directories are "
+                            "created automatically. Overwriting an existing file "
+                            "requires user approval."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string", "description": "Full file content to write"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List one directory (non-recursive): names, type, sizes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path (default '.')"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": ("Search file contents with a regular expression, recursively. "
+                            "Skips .git/node_modules/etc. Returns file:line:match, max 200 hits. "
+                            "Example pattern: 'def\\s+main'"),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Python regular expression"},
+                    "path": {"type": "string", "description": "Directory to search (default '.')"},
+                    "glob": {"type": "string", "description": "Filename filter, e.g. '*.py' (default '*')"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user",
+            "description": ("Ask the human a question when only they can decide: "
+                            "ambiguity, missing parameter, or before a risky action. "
+                            "Returns their answer as text."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                },
+                "required": ["question"],
+            },
+        },
+    },
+]
+
+_TOOL_NAMES = {t["function"]["name"] for t in TOOL_SCHEMAS}
+
+
+# ====================================================================== #
+#  DISPATCH — the single entry point the agent loop calls                #
+# ====================================================================== #
+
+def execute(name: str, arguments_json: str, ctx: ToolContext) -> str:
+    """Run one tool call. ALWAYS returns a string (errors included) so the
+    model can read them and adapt — never let an exception escape."""
+    try:
+        args = json.loads(arguments_json or "{}")
+    except json.JSONDecodeError as e:
+        return f"Error: arguments were not valid JSON ({e})."
+
+    if name not in _TOOL_NAMES:
+        return f"Error: unknown tool '{name}'. Available: {', '.join(sorted(_TOOL_NAMES))}"
+
+    try:
+        return clip(_HANDLERS[name](args, ctx))
+    except Exception as e:  # noqa: BLE001 — tools must never crash the loop
+        return f"Error: {type(e).__name__}: {e}"
+
+
+# ====================================================================== #
+#  IMPLEMENTATIONS                                                       #
+# ====================================================================== #
+
+def _run_bash(args: dict, ctx: ToolContext) -> str:
+    command = args["command"]
+    timeout = min(int(args.get("timeout") or 60), 600)
+
+    if any(p.search(command) for p in _DANGEROUS):
+        return ("Error: command matched the hard safety blocklist and was refused. "
+                "If you truly need it, the user can run it themselves.")
+
+    if not ctx.confirm(f"  run command: {command}"):
+        return "Refused by user. Ask what to do differently, or continue another way."
+
+    try:
+        proc = subprocess.run(
+            command, shell=True, cwd=ctx.cwd,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: command exceeded {timeout}s timeout (not killed; avoid long-running processes)."
+
+    out = [f"exit code: {proc.returncode}"]
+    if proc.stdout:
+        out.append("--- stdout ---\n" + proc.stdout.rstrip())
+    if proc.stderr:
+        out.append("--- stderr ---\n" + proc.stderr.rstrip())
+    return "\n".join(out)
+
+
+def _read_file(args: dict, ctx: ToolContext) -> str:
+    path = _resolve(args["path"], ctx)
+    if not path.is_file():
+        return f"Error: no such file: {path}"
+    offset = max(int(args.get("offset") or 1), 1)
+    limit = int(args.get("limit") or 2000)
+
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    window = lines[offset - 1: offset - 1 + limit]
+    numbered = "\n".join(f"{offset + i}->{line}" for i, line in enumerate(window))
+    header = f"{path} (lines {offset}-{offset + len(window) - 1} of {len(lines)})\n"
+    return header + (numbered or "(empty range)")
+
+
+def _write_file(args: dict, ctx: ToolContext) -> str:
+    path = _resolve(args["path"], ctx)
+    existed = path.exists()
+
+    if existed and not ctx.confirm(f"  overwrite file: {path}"):
+        return "Refused by user. Propose a different path or ask how to proceed."
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(args["content"], encoding="utf-8")
+    verb = "overwrote" if existed else "created"
+    return f"{verb} {path} ({len(args['content'])} chars)"
+
+
+def _list_dir(args: dict, ctx: ToolContext) -> str:
+    path = _resolve(args.get("path") or ".", ctx)
+    if not path.is_dir():
+        return f"Error: no such directory: {path}"
+
+    rows = []
+    for entry in sorted(path.iterdir(), key=lambda e: (e.is_file(), e.name.lower())):
+        if entry.is_dir():
+            rows.append(f"{entry.name}/")
+        else:
+            rows.append(f"{entry.name} ({entry.stat().st_size:,} B)")
+    return "\n".join(rows) or "(empty directory)"
+
+
+def _search_files(args: dict, ctx: ToolContext) -> str:
+    try:
+        rx = re.compile(args["pattern"])
+    except re.error as e:
+        return f"Error: invalid regex: {e}"
+
+    root = _resolve(args.get("path") or ".", ctx)
+    glob = args.get("glob") or "*"
+    hits: list[str] = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        for fname in fnmatch.filter(filenames, glob):
+            fpath = Path(dirpath) / fname
+            if fpath.stat().st_size > 2_000_000:
+                continue  # skip huge/binary-ish files
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if rx.search(line):
+                    hits.append(f"{fpath}:{lineno}:{line.strip()[:300]}")
+                    if len(hits) >= 200:
+                        return "\n".join(hits) + "\n... (hit cap of 200 reached; narrow the pattern)"
+    return "\n".join(hits) or f"no matches for /{args['pattern']}/ under {root}"
+
+
+def _ask_user(args: dict, ctx: ToolContext) -> str:
+    answer = ctx.ask(args["question"])
+    return f"user answered: {answer}" if answer else "(user gave no answer)"
+
+
+_HANDLERS = {
+    "run_bash": _run_bash,
+    "read_file": _read_file,
+    "write_file": _write_file,
+    "list_dir": _list_dir,
+    "search_files": _search_files,
+    "ask_user": _ask_user,
+}
