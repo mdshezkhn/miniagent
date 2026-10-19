@@ -17,7 +17,12 @@ from .providers import resolve
 
 
 class LLM:
-    def __init__(self, provider=None, model=None, base_url=None, api_key=None):
+    def __init__(self, provider=None, model=None, base_url=None, api_key=None,
+                 on_text=None):
+        """on_text(delta): optional callback receiving streamed text as it
+        arrives. When given (GUI mode), nothing is printed to stdout — the
+        UI decides how to show it. This is the only hook a GUI needs."""
+        self.on_text = on_text
         self.label, base_url, key, model = resolve(provider, model, base_url, api_key)
         if not key:
             raise SystemExit(
@@ -75,10 +80,13 @@ class LLM:
             if delta is None:
                 continue
 
-            # 1) plain text: print it live — this is the streaming UX
+            # 1) plain text: stream it — to the GUI if attached, else stdout
             if delta.content:
                 text_parts.append(delta.content)
-                print(delta.content, end="", flush=True)
+                if self.on_text:
+                    self.on_text(delta.content)
+                else:
+                    print(delta.content, end="", flush=True)
 
             # 2) tool calls arrive as fragments; reassemble by index
             for tc in (delta.tool_calls or []):
@@ -92,8 +100,8 @@ class LLM:
                     if fn.arguments:
                         slot["arguments"] += fn.arguments
 
-        if text_parts:
-            print()  # newline after streamed text
+        if text_parts and not self.on_text:
+            print()  # newline after streamed text (stdout mode only)
 
         message: dict = {"role": "assistant",
                          "content": "".join(text_parts) or None}

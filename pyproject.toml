@@ -5,6 +5,10 @@ description = "A minimal from-scratch coding agent (Claude Code-style loop) with
 requires-python = ">=3.10"
 dependencies = ["openai>=1.40"]
 
+[project.optional-dependencies]
+# `uv pip install -e ".[gui]"` — the web GUI; core CLI stays dependency-light
+gui = ["fastapi>=0.110", "uvicorn>=0.29"]
+
 [project.scripts]
 miniagent = "miniagent.cli:main"
 

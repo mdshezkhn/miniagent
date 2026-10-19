@@ -2,6 +2,7 @@
 
     miniagent                      interactive REPL (conversation persists)
     miniagent "do a thing"         one-shot task, then exit
+    miniagent gui                  local web GUI (browser chat interface)
     miniagent providers            which brains have API keys configured
     miniagent selftest             exercise all tools locally, zero tokens
 
@@ -11,6 +12,7 @@ Flags:
     --base-url / --api-key         fully custom OpenAI-compatible endpoint
     --auto / -y                    skip confirmation prompts (hard blocklist stays)
     --max-turns N                  runaway guard
+    --host / --port                gui mode only (defaults 127.0.0.1:7860)
 """
 
 import argparse
@@ -127,6 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--auto", "-y", action="store_true",
                     help="skip approval prompts (hard safety blocklist still applies)")
     ap.add_argument("--max-turns", type=int, default=30)
+    ap.add_argument("--host", default="127.0.0.1", help="gui mode: bind address")
+    ap.add_argument("--port", type=int, default=7860, help="gui mode: port")
     ap.add_argument("--version", action="version", version=f"miniagent {__version__}")
     return ap
 
@@ -140,6 +144,16 @@ def main() -> int:
         return cmd_providers()
     if sub == "selftest":
         return cmd_selftest()
+
+    if sub == "gui":
+        try:
+            from . import gui
+        except ImportError:
+            raise SystemExit(
+                "GUI extras not installed. Run:  uv pip install -e '.[gui]'"
+            )
+        gui.serve(host=args.host, port=args.port)
+        return 0
 
     llm = LLM(provider=args.provider, model=args.model,
               base_url=args.base_url, api_key=args.api_key)

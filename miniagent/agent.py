@@ -51,12 +51,31 @@ COMPACT_TOOL_KEEP = 1_500      # old tool outputs squeezed to this length
 
 class Agent:
     def __init__(self, llm: LLM, cwd: str, confirm, ask,
-                 auto: bool = False, max_turns: int = MAX_TURNS):
+                 auto: bool = False, max_turns: int = MAX_TURNS,
+                 on_event=None):
+        """on_event(dict): optional callback for tool activity —
+        {"type": "tool_start"|"tool_result", "name": ..., ...}.
+        Attached by the GUI; absent means CLI (printed instead).
+        THE LOOP ITSELF NEVER CHANGES: same class powers both UIs."""
         self.llm = llm
         self.max_turns = max_turns
+        self.on_event = on_event
         self.ctx = tools.ToolContext(cwd=cwd,
                                      confirm=(lambda _prompt: True) if auto else confirm,
                                      ask=ask)
+
+    def _emit(self, event: dict) -> None:
+        """Report tool activity: to the GUI if attached, else to stdout."""
+        if self.on_event:
+            self.on_event(event)
+            return
+        if event["type"] == "tool_start":
+            args = event["args"]
+            preview = args if len(args) <= 160 else args[:157] + "..."
+            print(f"[tool] {event['name']} {preview}")
+        else:
+            first = event["result"].splitlines()[0] if event["result"] else ""
+            print(f"       -> {first[:150]}")
 
     # ------------------------------------------------------------------ #
 
@@ -86,16 +105,13 @@ class Agent:
             for call in reply["tool_calls"]:
                 name = call["function"]["name"]
                 raw_args = call["function"]["arguments"]
-                preview = raw_args if len(raw_args) <= 160 else raw_args[:157] + "..."
-                print(f"[tool] {name} {preview}")
 
+                self._emit({"type": "tool_start", "name": name, "args": raw_args})
                 result = tools.execute(name, raw_args, self.ctx)
                 messages.append({"role": "tool",
                                  "tool_call_id": call["id"],
                                  "content": result})
-                # brief echo so the human can follow along
-                first = result.splitlines()[0] if result else ""
-                print(f"       -> {first[:150]}")
+                self._emit({"type": "tool_result", "name": name, "result": result})
 
         return "(stopped: reached max turns without a final answer)"
 

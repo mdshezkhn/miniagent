@@ -28,7 +28,8 @@ This project is that loop, ~500 commented lines, nothing hidden.
     # 1) put one or more API keys in .env (copy from .env.example)
     # 2) create the venv and install
     uv venv -p 3.12 .venv
-    uv pip install -e .
+    uv pip install -e .            # CLI only (1 dependency)
+    uv pip install -e ".[gui]"     # + web GUI (fastapi, uvicorn)
 
     # 3) verify tools work without spending a token
     miniagent selftest
@@ -40,6 +41,10 @@ This project is that loop, ~500 commented lines, nothing hidden.
     miniagent --model gemini-2.5-flash --provider gemini
     miniagent "explain the structure of this repo"   # one-shot
 
+    # 5) or run the GUI — chat in your browser
+    miniagent gui                      # -> http://127.0.0.1:7860
+    miniagent gui --port 7861 --host 127.0.0.1
+
 ## Adding a tool (the classic extension)
 
 1. Add a JSON-schema dict to `TOOL_SCHEMAS` in `tools.py`
@@ -50,5 +55,9 @@ That's it — the loop doesn't change. That's the whole trick.
 ## Learning path from here
 
 - read `agent.py` first (the loop), then `tools.py` (safety), then `llm.py` (streaming)
+- the GUI lesson: `gui.py` changed ZERO lines of the loop — it only attaches
+  callbacks (`llm.on_text`, `agent.on_event`, ToolContext `confirm`/`ask`).
+  Good architecture = UI is an adapter, not a rewrite. Also study gui.py's
+  SSE + worker-thread + approval-bridge pattern; it's what every web agent UI does.
 - exercises: add a `web_fetch` tool · add per-tool approval rules · add token counting & smarter compaction
 - then study a production agent for the advanced patterns (aider / OpenHands / opencode)
