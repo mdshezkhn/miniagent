@@ -206,12 +206,75 @@ async def index():
     return PAGE
 
 
+# ---- PWA: install "MoGo" from Chrome (Add to Home screen / Install) ---- #
+# Chrome requires: manifest + icons + service worker + secure context
+# (HTTPS tunnel, or http://127.0.0.1 in Termux on the phone itself).
+
+ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">
+<rect width="512" height="512" rx="96" fill="#0f1115"/>
+<rect x="28" y="28" width="456" height="456" rx="72" fill="#171a21"
+      stroke="#4f8cff" stroke-width="8"/>
+<text x="256" y="352" font-family="Arial, sans-serif" font-size="280"
+      font-weight="bold" fill="#4f8cff" text-anchor="middle">M</text>
+</svg>"""
+
+
+@app.get("/icon.svg")
+async def icon():
+    from fastapi.responses import Response
+    return Response(ICON_SVG, media_type="image/svg+xml")
+
+
+@app.get("/manifest.json")
+async def manifest():
+    return {
+        "name": "MoGo — miniagent", "short_name": "MoGo",
+        "start_url": "/", "display": "standalone",
+        "background_color": "#0f1115", "theme_color": "#0f1115",
+        "description": "Your personal coding agent, everywhere.",
+        "icons": [
+            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml",
+             "purpose": "any maskable"},
+        ],
+    }
+
+
+SW_JS = """// MoGo service worker: offline shell + never cache the API/SSE stream.
+const SHELL = ['/', '/icon.svg', '/manifest.json'];
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open('mogo-v1').then(c => c.addAll(SHELL)));
+  self.skipWaiting();
+});
+self.addEventListener('activate', e => self.clients.claim());
+self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  if (url.pathname.startsWith('/api/')) return;            // always live
+  e.respondWith(
+    caches.match(e.request).then(hit => hit || fetch(e.request))
+  );
+});
+"""
+
+
+@app.get("/sw.js")
+async def sw():
+    from fastapi.responses import Response
+    return Response(SW_JS, media_type="application/javascript")
+
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>miniagent</title>
+<title>MoGo</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0f1115">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<script>
+if ('serviceWorker' in navigator)   // installable as "MoGo" on Android/iOS
+  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#e6e9ef;
           --dim:#8b93a5; --accent:#4f8cff; --green:#3fb970; --red:#e0555f; }
