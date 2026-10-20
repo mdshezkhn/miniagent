@@ -228,10 +228,10 @@ async def icon():
 @app.get("/manifest.json")
 async def manifest():
     return {
-        "name": "MoGo — miniagent", "short_name": "MoGo",
+        "name": "MoGa — miniagent", "short_name": "MoGa",
         "start_url": "/", "display": "standalone",
         "background_color": "#0f1115", "theme_color": "#0f1115",
-        "description": "Your personal coding agent, everywhere.",
+        "description": "Your personal coding agent, everywhere — voice in, voice out.",
         "icons": [
             {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml",
              "purpose": "any maskable"},
@@ -239,7 +239,7 @@ async def manifest():
     }
 
 
-SW_JS = """// MoGo service worker: offline shell + never cache the API/SSE stream.
+SW_JS = """// MoGa service worker: offline shell + never cache the API/SSE stream.
 const SHELL = ['/', '/icon.svg', '/manifest.json'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open('mogo-v1').then(c => c.addAll(SHELL)));
@@ -267,12 +267,12 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MoGo</title>
+<title>MoGa</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0f1115">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <script>
-if ('serviceWorker' in navigator)   // installable as "MoGo" on Android/iOS
+if ('serviceWorker' in navigator)   // installable as "MoGa" on Android/iOS
   navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>
 <style>
@@ -331,6 +331,12 @@ if ('serviceWorker' in navigator)   // installable as "MoGo" on Android/iOS
   #send { background:var(--accent); color:#fff; border:0; border-radius:8px;
           padding:0 22px; cursor:pointer; font-size:14px; }
   #send:disabled { opacity:.45; cursor:default; }
+  #mic { background:var(--panel); color:var(--text); border:1px solid var(--line);
+         border-radius:8px; font-size:18px; cursor:pointer; padding:0 12px; }
+  .acts { margin-top:8px; display:flex; gap:8px; }
+  .acts button { background:var(--panel); color:var(--dim); border:1px solid var(--line);
+         border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; }
+  .acts button:hover { color:var(--text); }
   .status { max-width:860px; margin:0 auto; color:var(--dim); font-size:12px;
             padding:2px 0; min-height:18px; }
   /* phone-size screens (agent accessed from a phone on the LAN) */
@@ -350,12 +356,18 @@ if ('serviceWorker' in navigator)   // installable as "MoGo" on Android/iOS
   <select id="provider" title="brain"></select>
   <input id="model" placeholder="model (default)">
   <label title="skip approval prompts"><input type="checkbox" id="auto"> auto</label>
+  <select id="tlang" title="translate target language">
+    <option value="English">EN</option><option value="Chinese (Simplified)">中文</option>
+    <option value="Hindi">हिं</option><option value="Arabic">عربي</option>
+    <option value="Spanish">ES</option>
+  </select>
   <div class="grow"></div>
   <button id="new">+ new chat</button>
 </header>
 <div id="chat"></div>
 <div class="status" id="status"></div>
 <div id="inputbar">
+  <button id="mic" title="voice input (tap to dictate)">🎙</button>
   <textarea id="msg" placeholder="Give the agent a task...  (Enter to send, Shift+Enter for newline)"></textarea>
   <button id="send">Send</button>
 </div>
@@ -439,6 +451,50 @@ function addAsk(ev) {
   ok.onclick = answer; inp.onkeydown = e => { if (e.key === 'Enter') answer(); };
 }
 
+/* ---------- hands-free: voice input (STT), read-aloud + translate (TTS) ---------- */
+/* All via the browser's built-in Web Speech API — no server deps, works in
+   Chrome on Android. Translation uses the agent's own brain as translator. */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false;
+const micBtn = document.getElementById('mic');
+micBtn.onclick = () => {
+  if (!SR) { alert('Speech recognition is not supported in this browser.'); return; }
+  if (listening) { rec.stop(); return; }
+  rec = new SR();
+  rec.lang = document.getElementById('tlang').value.startsWith('Chinese') ? 'zh-CN'
+           : document.getElementById('tlang').value === 'Hindi' ? 'hi-IN'
+           : document.getElementById('tlang').value === 'Arabic' ? 'ar-SA'
+           : document.getElementById('tlang').value === 'Spanish' ? 'es-ES' : 'en-US';
+  rec.interimResults = true;
+  rec.onresult = e => {
+    let t = '';
+    for (const r of e.results) t += r[0].transcript;
+    document.getElementById('msg').value = t;
+  };
+  rec.onend = () => { listening = false; micBtn.textContent = '🎙'; };
+  rec.onerror = () => { listening = false; micBtn.textContent = '🎙'; };
+  rec.start(); listening = true; micBtn.textContent = '⏺';
+};
+
+function addActionRow(bubble) {           // appears under each finished answer
+  const row = el('div', 'acts');
+  const speak = el('button', '', '🔊 read');
+  const tr = el('button', '', '🌐 translate');
+  speak.onclick = () => {
+    const u = new SpeechSynthesisUtterance(bubble.innerText);
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);            // browser TTS reads the answer aloud
+  };
+  tr.onclick = () => {
+    const lang = document.getElementById('tlang').value;
+    document.getElementById('msg').value =
+      'Translate your previous answer into ' + lang + '. Reply with ONLY the translation.';
+    send();                              // agent translates via its own LLM
+  };
+  row.append(speak, tr);
+  bubble.appendChild(row);
+}
+
 function el(clsOrTag, cls, text) {
   if (cls !== undefined && text !== undefined) {           // el(tag, cls, text)
     const e = document.createElement(clsOrTag); e.className = cls;
@@ -488,7 +544,8 @@ async function send() {
         if (ev.type === 'approval') addApproval(ev);
         if (ev.type === 'ask')      addAsk(ev);
         if (ev.type === 'error')    chat.appendChild(el('div', 'err', ev.message));
-        if (ev.type === 'done')     statusEl.textContent = '';
+        if (ev.type === 'done')     { statusEl.textContent = '';
+                                      if (currentBubble) addActionRow(currentBubble); }
       }
     }
   } catch (e) {
