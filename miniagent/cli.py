@@ -20,7 +20,7 @@ import os
 import sys
 import tempfile
 
-from . import __version__, providers
+from . import __version__, providers, store
 from .agent import Agent
 from .config import load_env
 from .llm import LLM
@@ -102,6 +102,46 @@ def cmd_selftest() -> int:
     # schema sanity: every handler has a schema and vice versa
     names = {t["function"]["name"] for t in tools.TOOL_SCHEMAS}
     check("schema-handler parity", names == set(tools._HANDLERS))
+
+    # web_fetch against a throwaway local HTTP server (hermetic: no internet)
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _OnePage(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = (b"<html><head><title>t</title><style>x{}</style></head>"
+                    b"<body><h1>hello-web</h1><p>web fetch works</p></body></html>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # silence the test server
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _OnePage)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        r = tools.execute("web_fetch",
+                          f'{{"url": "http://127.0.0.1:{srv.server_port}/"}}', ctx)
+        check("web_fetch html->text", "hello-web" in r and "web fetch works" in r)
+        check("web_fetch strips css", "x{}" not in r)
+        r = tools.execute("web_fetch", '{"url": "ftp://nope.example"}', ctx)
+        check("web_fetch url guard", r.startswith("Error"))
+    finally:
+        srv.shutdown()
+
+    # store roundtrip: save, re-load, newest-file selection
+    from . import store
+    sdir = tempfile.mkdtemp(prefix="miniagent-storetest-")
+    p1 = store.save([{"role": "user", "content": "first"}], base=sdir)
+    store.save([{"role": "user", "content": "first"},
+                {"role": "assistant", "content": "second"}], p1, base=sdir)
+    store.save([{"role": "user", "content": "newest-session"}], base=sdir)
+    msgs, path = store.latest(base=sdir)
+    check("store latest wins", len(msgs) == 1 and msgs[0]["content"] == "newest-session")
+    p2 = store.save(msgs, path, base=sdir)
+    check("store reuses path", p2 == path)
 
     width = max(len(l) for l, _ in results) + 2
     for label, ok in results:
@@ -186,20 +226,30 @@ def main() -> int:
         return 0
 
     # ---------------- REPL: a loop around the loop ---------------- #
-    history: list[dict] = []
+    # Persistence: resume the newest saved session; save after each task.
+    history, session_path = store.latest()
+    if history:
+        print(f"(resumed previous session: {len(history)} messages)")
     print("Type a task, or /help. /new clears the conversation.\n")
     while True:
         try:
             task = input("you> ").strip()
         except (EOFError, KeyboardInterrupt):
+            if history:
+                session_path = store.save(history, session_path)
+                print(f"(saved: {session_path})")
             print()
             return 0
         if not task:
             continue
         if task in ("/exit", "/quit"):
+            if history:
+                session_path = store.save(history, session_path)
+                print(f"(saved: {session_path})")
             return 0
         if task == "/new":
             history.clear()
+            session_path = None   # next save starts a fresh file
             print("(conversation cleared)\n")
             continue
         if task == "/help":
@@ -213,6 +263,7 @@ def main() -> int:
             raise
         except Exception as e:  # noqa: BLE001 — REPL must survive anything
             print(f"\n[error] {type(e).__name__}: {e}\n")
+        session_path = store.save(history, session_path)  # survive crashes
         print()
 
 

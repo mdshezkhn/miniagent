@@ -21,6 +21,7 @@ import json
 import os
 import re
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 
 MAX_OUTPUT = 20_000   # chars per tool result fed back to the model
@@ -156,6 +157,22 @@ TOOL_SCHEMAS = [
                     "glob": {"type": "string", "description": "Filename filter, e.g. '*.py' (default '*')"},
                 },
                 "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": ("Download a web page and return readable text (docs, APIs, "
+                            "articles). HTML is stripped to text; JSON/XML/text return "
+                            "raw; binary content reports metadata only. Output is capped."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL, http:// or https://"},
+                },
+                "required": ["url"],
             },
         },
     },
@@ -307,11 +324,85 @@ def _ask_user(args: dict, ctx: ToolContext) -> str:
     return f"user answered: {answer}" if answer else "(user gave no answer)"
 
 
+# ---- web_fetch --------------------------------------------------------- #
+# Uses httpx — already in the venv because the openai SDK depends on it,
+# so we add ZERO new dependencies. It handles gzip and redirects, which
+# urllib makes painful.
+# NOTE (SSRF): a deployed agent should block private/localhost URLs; for a
+# local personal agent fetching your own dev servers is a feature, so we
+# allow it. Read-only tool => no approval needed (same policy as read_file).
+
+class _TextExtract(HTMLParser):
+    """stdlib HTML -> text: keeps visible words, drops script/style/svg/head."""
+    SKIP = {"script", "style", "noscript", "svg", "head", "template"}
+
+    def __init__(self):
+        super().__init__()
+        self.parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip and data.strip():
+            self.parts.append(data.strip())
+
+
+def _html_to_text(html: str) -> str:
+    p = _TextExtract()
+    p.feed(html)
+    return "\n".join(p.parts)
+
+
+def _web_fetch(args: dict, ctx: ToolContext) -> str:
+    import httpx  # local import: keeps module import cheap for CLI users
+
+    url = args["url"]
+    if not re.match(r"^https?://", url):
+        return "Error: url must start with http:// or https://"
+
+    # THE PROXY GOTCHA (bit us in testing): httpx reads HTTP_PROXY/HTTPS_PROXY
+    # env vars by default, so a local dev server gets fetched *through* the
+    # proxy and dies. Correct behavior = what NO_PROXY does: never proxy
+    # local/private hosts, proxy everything else.
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    is_local = (host in ("localhost", "127.0.0.1", "::1")
+                or host.startswith(("192.168.", "10.", "169.254.")))
+
+    try:
+        r = httpx.get(url, follow_redirects=True, timeout=20,
+                      trust_env=not is_local,   # ignore proxy env for local
+                      headers={"User-Agent": "Mozilla/5.0 (miniagent/0.3; +local agent)"})
+    except httpx.HTTPError as e:
+        return (f"Error: fetch failed ({type(e).__name__}: {e}). "
+                "The site may be unreachable from this network.")
+
+    ctype = r.headers.get("content-type", "").lower()
+    if "html" in ctype:
+        body, kind = _html_to_text(r.text), "readable text"
+    elif any(t in ctype for t in ("json", "text/", "xml", "javascript")):
+        body, kind = r.text, "raw"
+    else:
+        return (f"{url} -> {r.status_code} {ctype} — binary/undisplayable "
+                f"({len(r.content):,} bytes); download it with run_bash instead.")
+
+    header = f"{url} -> {r.status_code} {ctype} ({kind}, {len(body):,} chars)"
+    return header + "\n\n" + body
+
+
 _HANDLERS = {
     "run_bash": _run_bash,
     "read_file": _read_file,
     "write_file": _write_file,
     "list_dir": _list_dir,
     "search_files": _search_files,
+    "web_fetch": _web_fetch,
     "ask_user": _ask_user,
 }

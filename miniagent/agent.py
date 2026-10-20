@@ -34,6 +34,7 @@ what they'd prefer.
 - run_bash: run a shell command (builds, git, installs, quick analysis).
 - read_file / write_file / list_dir / search_files: explore and edit the \
 project in the working directory. Read a file before you edit it.
+- web_fetch: download a web page (docs, APIs, articles) and read its text.
 - ask_user: only when a human decision is genuinely needed.
 
 # Rules

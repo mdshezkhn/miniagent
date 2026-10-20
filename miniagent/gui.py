@@ -35,7 +35,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from . import providers
+from . import providers, store
 from .agent import Agent
 from .config import load_env
 from .llm import LLM
@@ -52,6 +52,7 @@ class Session:
         self.busy = threading.Lock()           # one task at a time
         self.events: queue.Queue | None = None # worker -> browser pipe
         self.pending: dict[str, dict] = {}     # approval ids awaiting clicks
+        self.path = None                       # session JSON file on disk
 
 
 session = Session()
@@ -100,7 +101,34 @@ async def api_new():
     if session.busy.locked():
         return JSONResponse({"error": "agent is busy"}, status_code=409)
     session.history.clear()
+    session.path = None      # next save starts a fresh file
     return {"ok": True}
+
+
+@app.get("/api/history")
+async def api_history():
+    """Replay a saved conversation as the same event shapes the live stream
+    uses — so the browser re-renders last session with ONE code path.
+    (The message list is the source of truth; the UI is derived from it.)"""
+    events: list[dict] = []
+    names: dict[str, str] = {}                 # tool_call_id -> tool name
+    for m in session.history:
+        role = m.get("role")
+        if role == "user":
+            events.append({"type": "user", "text": m.get("content") or ""})
+        elif role == "assistant":
+            if m.get("content"):
+                events.append({"type": "text", "delta": m["content"]})
+            for tc in m.get("tool_calls") or []:
+                names[tc["id"]] = tc["function"]["name"]
+                events.append({"type": "tool_start",
+                               "name": tc["function"]["name"],
+                               "args": tc["function"]["arguments"]})
+        elif role == "tool":
+            events.append({"type": "tool_result",
+                           "name": names.get(m.get("tool_call_id"), "tool"),
+                           "result": m.get("content") or ""})
+    return events
 
 
 @app.post("/api/approve")
@@ -144,6 +172,10 @@ async def api_chat(req: Request):
             _push({"type": "error", "message": f"{type(e).__name__}: {e}"})
         finally:
             session.events = None
+            try:
+                session.path = store.save(session.history, session.path)
+            except OSError as e:               # disk full, permissions, ...
+                _push({"type": "error", "message": f"session not saved: {e}"})
             session.busy.release()
             q.put({"type": "done"})
 
@@ -259,7 +291,8 @@ PAGE = """<!doctype html>
 const chat = document.getElementById('chat');
 const statusEl = document.getElementById('status');
 const sendBtn = document.getElementById('send');
-let currentText = null;   // open text div inside current assistant bubble
+let currentText = null;     // open text div inside current assistant bubble
+let currentBubble = null;   // current assistant bubble container
 
 /* ---------- rendering ---------- */
 function scroll() { chat.scrollTop = chat.scrollHeight; }
@@ -267,17 +300,21 @@ function scroll() { chat.scrollTop = chat.scrollHeight; }
 function addUser(text) {
   const m = el('div', 'msg user'); const b = el('div', 'bubble');
   b.textContent = text; m.appendChild(b); chat.appendChild(m);
-  currentText = null; scroll();
+  currentText = null; currentBubble = null; scroll();
 }
 
-function startAssistant() {
-  const m = el('div', 'msg assistant');
-  m.appendChild(el('div', 'who', 'agent'));
-  const b = el('div', 'bubble'); m.appendChild(b);
-  chat.appendChild(m); return b;
+function ensureAssistant() {   // create the bubble lazily, once per turn
+  if (!currentBubble) {
+    const m = el('div', 'msg assistant');
+    m.appendChild(el('div', 'who', 'agent'));
+    currentBubble = el('div', 'bubble'); m.appendChild(currentBubble);
+    chat.appendChild(m);
+  }
+  return currentBubble;
 }
 
-function addTextDelta(d, bubble) {
+function addTextDelta(d) {
+  const bubble = ensureAssistant();
   if (!currentText) { currentText = el('div'); bubble.appendChild(currentText); }
   currentText.textContent += d; scroll();
 }
@@ -348,7 +385,6 @@ async function send() {
   document.getElementById('msg').value = '';
   addUser(msg);
   sendBtn.disabled = true; statusEl.textContent = 'thinking...';
-  const bubble = startAssistant();
   let openTool = null;
   try {
     const res = await fetch('/api/chat', {
@@ -373,7 +409,7 @@ async function send() {
         if (!frame.startsWith('data: ')) continue;         // heartbeats etc.
         const ev = JSON.parse(frame.slice(6));
         if (ev.type === 'start')  statusEl.textContent = 'brain: ' + ev.brain;
-        if (ev.type === 'text')   addTextDelta(ev.delta, bubble);
+        if (ev.type === 'text')   addTextDelta(ev.delta);
         if (ev.type === 'tool_start') { statusEl.textContent = 'running ' + ev.name + '...';
                                         openTool = addTool(ev.name, ev.args); }
         if (ev.type === 'tool_result') { if (openTool) fillTool(openTool, ev.result); }
@@ -415,6 +451,20 @@ fetch('/api/providers').then(r => r.json()).then(list => {
   };
   sel.onchange();
 });
+
+/* ---------- history replay: last session re-rendered on page load ---------- */
+async function loadHistory() {
+  const evs = await (await fetch('/api/history')).json();
+  let openTool = null;
+  for (const ev of evs) {
+    if (ev.type === 'user') addUser(ev.text);
+    else if (ev.type === 'text') addTextDelta(ev.delta);
+    else if (ev.type === 'tool_start') openTool = addTool(ev.name, ev.args);
+    else if (ev.type === 'tool_result') { if (openTool) fillTool(openTool, ev.result); openTool = null; }
+  }
+  if (evs.length) scroll();
+}
+loadHistory();
 </script>
 </body>
 </html>
@@ -423,6 +473,10 @@ fetch('/api/providers').then(r => r.json()).then(list => {
 
 def serve(host: str = "127.0.0.1", port: int = 7860) -> None:
     load_env()
+    # Resume the newest saved conversation (store.py) — survives restarts.
+    session.history, session.path = store.latest()
+    if session.history:
+        print(f"(resumed session: {len(session.history)} messages from {session.path.name})")
     print(f"miniagent GUI -> http://{host}:{port}   (Ctrl+C to stop)")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 

@@ -40,10 +40,11 @@ PROVIDERS: dict[str, Provider] = {
         name="NVIDIA NIM",
         base_url="https://integrate.api.nvidia.com/v1",
         env_key="NVIDIA_API_KEY",
-        default_model="nvidia/nemotron-3-super-120b-a12b",
-        notes="key starts with nvapi- (build.nvidia.com); not every model is "
-              "entitled to every account — 'miniagent providers' + trial & error; "
-              "list live ids: GET /v1/models",
+        default_model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        notes="key starts with nvapi- (build.nvidia.com); WARNING: model "
+              "entitlements ROTATE — a model that works today may 404 tomorrow "
+              "('Function not found for account'). On 404 re-probe GET /v1/models; "
+              "known-good alternate: nvidia/nemotron-3-ultra-550b-a55b",
     ),
     "gemini": Provider(
         name="Google Gemini (OpenAI-compat endpoint)",

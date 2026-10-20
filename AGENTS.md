@@ -1,6 +1,6 @@
 # miniagent — a coding agent you fully own
 
-Source: D:/projects/mini-agent · Python 3.12 · single dependency: `openai`
+Source: D:/projects/mini-agent · Python 3.12 · dependencies: `openai`, `httpx` (+ `fastapi`/`uvicorn` for the GUI)
 
 ## The whole idea (read this first)
 
@@ -18,9 +18,11 @@ This project is that loop, ~500 commented lines, nothing hidden.
     miniagent/
       providers.py  which brain to use (BigModel/OpenRouter/NVIDIA/Gemini/Groq/DeepSeek/custom)
       llm.py        streaming chat client (works with any OpenAI-compatible API)
-      tools.py      the agent's hands: bash, read/write file, list, search, ask_user (+ safety gates)
+      tools.py      the agent's hands: bash, read/write file, list, search, web_fetch, ask_user (+ safety gates)
       agent.py      THE LOOP + system prompt + context compaction
       cli.py        REPL & one-shot mode, `providers` and `selftest` subcommands
+      gui.py        browser UI (FastAPI + SSE + one embedded page, approvals become buttons)
+      store.py      conversations as JSON under .miniagent/sessions/ — survive restarts
       config.py     tiny .env loader
 
 ## Quick start
@@ -45,12 +47,26 @@ This project is that loop, ~500 commented lines, nothing hidden.
     miniagent gui                      # -> http://127.0.0.1:7860
     miniagent gui --port 7861 --host 127.0.0.1
 
+    Conversations persist across restarts (JSON under .miniagent/sessions/,
+    newest is auto-resumed in both REPL and GUI; /new starts a fresh one).
+
 ## Adding a tool (the classic extension)
 
+`web_fetch` (v0.3) is the worked example — read it in tools.py end to end:
+
 1. Add a JSON-schema dict to `TOOL_SCHEMAS` in `tools.py`
-2. Add an `elif name == "your_tool":` branch in `execute()`
+2. Add a handler (`_web_fetch`) + an entry in `_HANDLERS`
 3. Mention it in the system prompt in `agent.py`
+4. Add a hermetic check to `cmd_selftest` in `cli.py` (local test server)
 That's it — the loop doesn't change. That's the whole trick.
+
+Gotchas learned the hard way (all fixed in code, commented where they bite):
+- httpx/urllib honor HTTP_PROXY env vars — localhost fetches die in the
+  proxy; bypass it for local/private hosts (`trust_env=not is_local`)
+- NVIDIA NIM model entitlements ROTATE: yesterday's model can 404 tomorrow
+  ("Function not found for account") — re-probe GET /v1/models, pick another
+- sorting session files by NAME breaks when two saves land in the same
+  second; sort by mtime (store.py)
 
 ## Learning path from here
 
@@ -59,5 +75,6 @@ That's it — the loop doesn't change. That's the whole trick.
   callbacks (`llm.on_text`, `agent.on_event`, ToolContext `confirm`/`ask`).
   Good architecture = UI is an adapter, not a rewrite. Also study gui.py's
   SSE + worker-thread + approval-bridge pattern; it's what every web agent UI does.
-- exercises: add a `web_fetch` tool · add per-tool approval rules · add token counting & smarter compaction
+- exercises: per-tool approval rules · token counting & smarter compaction ·
+  multi-session picker (list .miniagent/sessions/, switch chats)
 - then study a production agent for the advanced patterns (aider / OpenHands / opencode)

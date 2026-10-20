@@ -1,9 +1,9 @@
 [project]
 name = "miniagent"
-version = "0.1.0"
+version = "0.3.0"
 description = "A minimal from-scratch coding agent (Claude Code-style loop) with pluggable OpenAI-compatible providers: BigModel, OpenRouter, NVIDIA, Gemini, Groq, DeepSeek..."
 requires-python = ">=3.10"
-dependencies = ["openai>=1.40"]
+dependencies = ["openai>=1.40", "httpx>=0.27"]
 
 [project.optional-dependencies]
 # `uv pip install -e ".[gui]"` — the web GUI; core CLI stays dependency-light
