@@ -270,6 +270,15 @@ PAGE = """<!doctype html>
   #send:disabled { opacity:.45; cursor:default; }
   .status { max-width:860px; margin:0 auto; color:var(--dim); font-size:12px;
             padding:2px 0; min-height:18px; }
+  /* phone-size screens (agent accessed from a phone on the LAN) */
+  @media (max-width: 640px) {
+    header { flex-wrap: wrap; padding: 8px 10px; }
+    header input#model { width: 140px; flex: 1; }
+    #chat { padding: 12px 10px; }
+    .msg, .tool, .card, .err { max-width: 100%; }
+    #inputbar { padding: 10px; }
+    #inputbar textarea { height: 64px; font-size: 16px; }  /* stops iOS zoom */
+  }
 </style>
 </head>
 <body>
