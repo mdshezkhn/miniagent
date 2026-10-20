@@ -10,4 +10,4 @@ Six files that matter:
     store.py      conversations as JSON files (survive restarts)
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

@@ -196,6 +196,20 @@ def cmd_selftest() -> int:
 
 
 # ---------------------------------------------------------------------- #
+#  Slash commands (reverse-engineered from Claude Code):                  #
+#  .miniagent/commands/<name>.md -> type /<name> to run it as a prompt    #
+# ---------------------------------------------------------------------- #
+
+def load_commands(cwd: str) -> dict[str, str]:
+    from pathlib import Path
+    d = Path(cwd) / ".miniagent" / "commands"
+    if not d.is_dir():
+        return {}
+    return {f.stem: f.read_text(encoding="utf-8", errors="replace").strip()
+            for f in sorted(d.glob("*.md")) if f.stem.isidentifier()}
+
+
+# ---------------------------------------------------------------------- #
 #  Main                                                                   #
 # ---------------------------------------------------------------------- #
 
@@ -273,6 +287,9 @@ def main() -> int:
     history, session_path = store.latest()
     if history:
         print(f"(resumed previous session: {len(history)} messages)")
+    commands = load_commands(os.getcwd())
+    if commands:
+        print(f"slash commands: {' '.join('/' + c for c in commands)}")
     print("Type a task, or /help. /new clears the conversation.\n")
     while True:
         try:
@@ -297,6 +314,15 @@ def main() -> int:
             continue
         if task == "/help":
             print("commands: /new (clear conversation) /exit  — anything else is a task\n")
+            continue
+        if task.startswith("/") and task[1:] in commands:
+            print(f"(slash command /{task[1:]} -> prompt file)")
+            try:
+                agent.run(commands[task[1:]], history=history)
+            except Exception as e:  # noqa: BLE001
+                print(f"\n[error] {type(e).__name__}: {e}\n")
+            session_path = store.save(history, session_path)
+            print()
             continue
         try:
             agent.run(task, history=history)
