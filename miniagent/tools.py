@@ -179,6 +179,41 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "web_search",
+            "description": ("Search the live web (DuckDuckGo) and get top results as "
+                            "numbered title + URL + snippet. Use for current events, "
+                            "library docs, error messages; follow up with web_fetch on "
+                            "the best hits. Cite the URLs you actually used."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "max_results": {"type": "integer", "description": "Max results (default 6)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember",
+            "description": ("Save a durable fact to long-term memory "
+                            "(.miniagent/memory.md), loaded in every future session. "
+                            "Use for stable user preferences, project conventions and "
+                            "hard-won gotchas — NOT per-task details."),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact": {"type": "string", "description": "One self-contained sentence"},
+                },
+                "required": ["fact"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_user",
             "description": ("Ask the human a question when only they can decide: "
                             "ambiguity, missing parameter, or before a risky action. "
@@ -397,6 +432,83 @@ def _web_fetch(args: dict, ctx: ToolContext) -> str:
     return header + "\n\n" + body
 
 
+# ---- web_search ------------------------------------------------------- #
+# The Perplexity feature: live retrieval before synthesis. No API key —
+# DuckDuckGo's HTML endpoints. Goes THROUGH the system proxy (external),
+# unlike web_fetch's local bypass. Fragile by nature (scraping); a real
+# deployment swaps this for a search API (Brave/Tavily/SearXNG) — same shape.
+
+_SEARCH_URL = "https://html.duckduckgo.com/html/"     # patched in selftest
+_SEARCH_URL_FALLBACK = "https://lite.duckduckgo.com/lite/"
+
+
+def _strip_tags(s: str) -> str:
+    from html import unescape
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\s+", " ", unescape(s)).strip()
+
+
+def _parse_search(page: str) -> list[tuple[str, str, str]]:
+    """Extract (title, url, snippet) triples from a DDG results page."""
+    from urllib.parse import unquote
+    pairs = []
+    for m in re.finditer(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                         page, re.S):
+        url, title = m.group(1), _strip_tags(m.group(2))
+        um = re.search(r"[?&]uddg=([^&]+)", url)   # DDG redirect: /l/?uddg=<enc>
+        if um:
+            url = unquote(um.group(1))
+        pairs.append((title, url))
+    snips = [_strip_tags(s) for s in re.findall(
+        r'class="result__snippet"[^>]*>(.*?)</a>', page, re.S)]
+    return [(t, u, snips[i] if i < len(snips) else "")
+            for i, (t, u) in enumerate(pairs)]
+
+
+def _web_search(args: dict, ctx: ToolContext) -> str:
+    import httpx
+
+    query = args["query"]
+    want = min(int(args.get("max_results") or 6), 10)
+
+    last = ""
+    for endpoint in (_SEARCH_URL, _SEARCH_URL_FALLBACK):
+        try:
+            r = httpx.get(endpoint, params={"q": query}, timeout=20,
+                          follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 (miniagent/0.4)"})
+        except httpx.HTTPError as e:
+            last = f"{type(e).__name__}: {e}"
+            continue
+        if r.status_code != 200:
+            last = f"HTTP {r.status_code}"
+            continue
+        hits = _parse_search(r.text)[:want]
+        if hits:
+            lines = [f"web results for '{query}' ({len(hits)})"]
+            for i, (title, url, snip) in enumerate(hits, 1):
+                lines.append(f"[{i}] {title}\n    {url}" + (f"\n    {snip}" if snip else ""))
+            return "\n".join(lines)
+        if "anomaly" in r.text.lower() or "botnet" in r.text.lower():
+            last = "DDG flagged the client as a bot"
+            continue
+        last = "no results parsed"
+
+    return (f"Error: web search failed ({last}). Retry once, then answer from "
+            "your own knowledge and say it may be outdated.")
+
+
+# ---- remember (ChatGPT-style persistent memory) ------------------------ #
+
+def _remember(args: dict, ctx: ToolContext) -> str:
+    from . import store
+    fact = args["fact"].strip()
+    if not fact:
+        return "Error: empty fact."
+    path = store.append_memory(fact, base=ctx.cwd)  # memory lives with the project
+    return f"remembered to {path} (will load in future sessions): {fact}"
+
+
 _HANDLERS = {
     "run_bash": _run_bash,
     "read_file": _read_file,
@@ -404,5 +516,7 @@ _HANDLERS = {
     "list_dir": _list_dir,
     "search_files": _search_files,
     "web_fetch": _web_fetch,
+    "web_search": _web_search,
+    "remember": _remember,
     "ask_user": _ask_user,
 }

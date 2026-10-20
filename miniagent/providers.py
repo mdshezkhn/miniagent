@@ -70,7 +70,9 @@ PROVIDERS: dict[str, Provider] = {
 }
 
 # Which provider to try first when --provider is not given.
-PREFERENCE_ORDER = ["bigmodel", "openrouter", "groq", "gemini", "nvidia", "deepseek"]
+# (nvidia first: it currently has a working key + credits; openrouter's
+# key is valid but the account is out of credits — reorder as yours change)
+PREFERENCE_ORDER = ["nvidia", "bigmodel", "groq", "gemini", "openrouter", "deepseek"]
 
 
 def default_provider() -> str:

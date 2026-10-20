@@ -75,6 +75,11 @@ Gotchas learned the hard way (all fixed in code, commented where they bite):
   callbacks (`llm.on_text`, `agent.on_event`, ToolContext `confirm`/`ask`).
   Good architecture = UI is an adapter, not a rewrite. Also study gui.py's
   SSE + worker-thread + approval-bridge pattern; it's what every web agent UI does.
+- v0.4 adds the big-assistant features, each mapped to its product:
+  web_search + cite-your-sources (Perplexity: retrieve -> rank -> cited answer),
+  remember tool + .miniagent/memory.md injected at session start (ChatGPT memory),
+  AGENTS.md auto-loaded into the system prompt (Claude Code's CLAUDE.md).
+  The loop file (agent.py) still barely changed: build_system_prompt() + one tool each.
 - exercises: per-tool approval rules · token counting & smarter compaction ·
   multi-session picker (list .miniagent/sessions/, switch chats)
 - then study a production agent for the advanced patterns (aider / OpenHands / opencode)

@@ -53,3 +53,26 @@ def latest(base: str | Path | None = None) -> tuple[list[dict], Path | None]:
         return list(data.get("messages", [])), newest
     except (json.JSONDecodeError, OSError):
         return [], None  # a corrupt file shouldn't brick the agent
+
+
+# ---- long-term memory (ChatGPT-style: facts that outlive a session) ---- #
+
+def memory_path(base: str | Path | None = None) -> Path:
+    return Path(base or Path.cwd()) / ".miniagent" / "memory.md"
+
+
+def load_memory(base: str | Path | None = None) -> str:
+    try:
+        return memory_path(base).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def append_memory(fact: str, base: str | Path | None = None) -> Path:
+    p = memory_path(base)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        p.write_text("# miniagent long-term memory\n", encoding="utf-8")
+    with p.open("a", encoding="utf-8") as f:
+        f.write(f"- {time.strftime('%Y-%m-%d')} {fact}\n")
+    return p

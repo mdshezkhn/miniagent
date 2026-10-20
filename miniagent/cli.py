@@ -143,6 +143,49 @@ def cmd_selftest() -> int:
     p2 = store.save(msgs, path, base=sdir)
     check("store reuses path", p2 == path)
 
+    # web_search hermetically: fake DDG results page on a local server
+    class _Serp(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = (b'<a class="result__a" href="/l/?uddg=http%3A%2F%2Fexample.org%2Fa">Res<b>ult One</b></a>'
+                    b'<a class="result__snippet">first snippet</a>'
+                    b'<a class="result__a" href="http://example.org/b">Result Two</a>'
+                    b'<a class="result__snippet">second snippet</a>')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    serp = ThreadingHTTPServer(("127.0.0.1", 0), _Serp)
+    threading.Thread(target=serp.serve_forever, daemon=True).start()
+    real_url = tools._SEARCH_URL
+    tools._SEARCH_URL = f"http://127.0.0.1:{serp.server_port}/"
+    tools._SEARCH_URL_FALLBACK = real_url
+    try:
+        r = tools.execute("web_search", '{"query": "anything"}', ctx)
+        check("web_search parses", "Result One" in r and "http://example.org/a" in r
+              and "[2] Result Two" in r)
+    finally:
+        tools._SEARCH_URL = real_url
+        tools._SEARCH_URL_FALLBACK = "https://lite.duckduckgo.com/lite/"
+
+    # remember -> memory file -> loaded into system prompt
+    mdir = tempfile.mkdtemp(prefix="miniagent-memtest-")
+    ctx2 = tools.ToolContext(cwd=mdir, confirm=lambda p: True, ask=lambda q: "")
+    r = tools.execute("remember", '{"fact": "user prefers concise answers"}', ctx2)
+    check("remember writes", "remembered" in r)
+    mem = store.load_memory(base=mdir)
+    check("memory roundtrip", "concise answers" in mem)
+    import pathlib
+    mfile = pathlib.Path(mdir) / "AGENTS.md"
+    mfile.write_text("PROJECT RULE: always run tests", encoding="utf-8")
+    from .agent import build_system_prompt
+    sysp = build_system_prompt(mdir)
+    check("system prompt assembly", "PROJECT RULE" in sysp and "concise answers" in sysp
+          and "mini-agent, a coding assistant" in sysp)
+
     width = max(len(l) for l, _ in results) + 2
     for label, ok in results:
         print(f"{'PASS' if ok else 'FAIL'}  {label:<{width}}")

@@ -34,7 +34,10 @@ what they'd prefer.
 - run_bash: run a shell command (builds, git, installs, quick analysis).
 - read_file / write_file / list_dir / search_files: explore and edit the \
 project in the working directory. Read a file before you edit it.
-- web_fetch: download a web page (docs, APIs, articles) and read its text.
+- web_search + web_fetch: search the live web, then read the best hits. \
+When your answer relies on the web, LIST THE SOURCE URLS at the end.
+- remember: save a durable fact (preferences, conventions, gotchas) to \
+long-term memory for future sessions.
 - ask_user: only when a human decision is genuinely needed.
 
 # Rules
@@ -49,6 +52,39 @@ MAX_TURNS = 30                 # runaway-loop guard
 COMPACT_THRESHOLD = 120_000    # chars of conversation before compaction
 COMPACT_TOOL_KEEP = 1_500      # old tool outputs squeezed to this length
 
+# Caps for injected context (the agent-harness skill's advice: keep the
+# system prompt minimal; big guidance lives in files and is loaded clipped).
+AGENTS_MD_CAP = 6_000
+MEMORY_CAP = 4_000
+
+
+def build_system_prompt(cwd: str) -> str:
+    """Claude-Code-style context assembly: static identity + project md +
+    long-term memory, each capped. (Claude Code reads CLAUDE.md/AGENTS.md the
+    same way; ChatGPT injects stored memories at query time.)"""
+    from pathlib import Path
+
+    parts = [SYSTEM_PROMPT]
+
+    agents_md = Path(cwd) / "AGENTS.md"
+    if agents_md.is_file():
+        try:
+            text = agents_md.read_text(encoding="utf-8", errors="replace")
+            if len(text) > AGENTS_MD_CAP:
+                text = text[:AGENTS_MD_CAP] + "\n... [AGENTS.md clipped]"
+            parts.append("# Project context (AGENTS.md — instructions for you)\n" + text)
+        except OSError:
+            pass
+
+    from . import store
+    mem = store.load_memory(base=cwd)
+    if mem:
+        if len(mem) > MEMORY_CAP:
+            mem = mem[:MEMORY_CAP] + "\n... [memory clipped]"
+        parts.append("# Long-term memory from earlier sessions\n" + mem)
+
+    return "\n\n".join(parts)
+
 
 class Agent:
     def __init__(self, llm: LLM, cwd: str, confirm, ask,
@@ -61,6 +97,8 @@ class Agent:
         self.llm = llm
         self.max_turns = max_turns
         self.on_event = on_event
+        # Dynamic system prompt: identity + AGENTS.md + long-term memory.
+        self.system_prompt = build_system_prompt(cwd)
         self.ctx = tools.ToolContext(cwd=cwd,
                                      confirm=(lambda _prompt: True) if auto else confirm,
                                      ask=ask)
@@ -88,7 +126,7 @@ class Agent:
         """
         messages = history if history is not None else []
         if not messages:
-            messages.append({"role": "system", "content": SYSTEM_PROMPT})
+            messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": task})
 
         for _turn in range(self.max_turns):
