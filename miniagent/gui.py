@@ -206,6 +206,18 @@ async def index():
     return PAGE
 
 
+@app.get("/moga.apk")
+async def moga_apk():
+    """Direct APK download link (open on phone in the same Wi-Fi)."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    p = Path(__file__).resolve().parent.parent / "demo-scratch" / "MoGa.apk"
+    if not p.is_file():
+        return JSONResponse({"error": "MoGa.apk not present"}, status_code=404)
+    return FileResponse(p, filename="MoGa.apk",
+                        media_type="application/vnd.android.package-archive")
+
+
 # ---- PWA: install "MoGo" from Chrome (Add to Home screen / Install) ---- #
 # Chrome requires: manifest + icons + service worker + secure context
 # (HTTPS tunnel, or http://127.0.0.1 in Termux on the phone itself).
