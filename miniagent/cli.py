@@ -228,6 +228,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-turns", type=int, default=30)
     ap.add_argument("--host", default="127.0.0.1", help="gui mode: bind address")
     ap.add_argument("--port", type=int, default=7860, help="gui mode: port")
+    ap.add_argument("--token", help="gui mode: password (Basic auth) — REQUIRED risk gate "
+                                    "when binding beyond localhost; auto-defaults to "
+                                    "'miniagent' if you forget")
     ap.add_argument("--version", action="version", version=f"miniagent {__version__}")
     return ap
 
@@ -249,7 +252,7 @@ def main() -> int:
             raise SystemExit(
                 "GUI extras not installed. Run:  uv pip install -e '.[gui]'"
             )
-        gui.serve(host=args.host, port=args.port)
+        gui.serve(host=args.host, port=args.port, token=args.token)
         return 0
 
     llm = LLM(provider=args.provider, model=args.model,

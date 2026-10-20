@@ -480,12 +480,41 @@ loadHistory();
 """
 
 
-def serve(host: str = "127.0.0.1", port: int = 7860) -> None:
+def _install_basic_auth(token: str) -> None:
+    """One shared password (HTTP Basic). Browser asks once, then remembers.
+    Minimal but honest protection when exposing the GUI beyond localhost —
+    this agent can read/write files and run commands, so a public URL
+    MUST NOT be naked."""
+    import base64
+    import secrets as _secrets
+
+    @app.middleware("http")
+    async def _auth(request, call_next):
+        header = request.headers.get("authorization", "")
+        given = ""
+        try:
+            scheme, cred = header.split(None, 1)
+            if scheme.lower() == "basic":
+                given = base64.b64decode(cred).decode("utf-8", "replace").split(":", 1)[-1]
+        except Exception:
+            given = ""
+        if not _secrets.compare_digest(given, token):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": "unauthorized"}, status_code=401,
+                                headers={"WWW-Authenticate": 'Basic realm="miniagent"'})
+        return await call_next(request)
+
+    print("auth: ON (password = your --token; the browser will ask once)")
+
+
+def serve(host: str = "127.0.0.1", port: int = 7860, token: str | None = None) -> None:
     load_env()
     # Resume the newest saved conversation (store.py) — survives restarts.
     session.history, session.path = store.latest()
     if session.history:
         print(f"(resumed session: {len(session.history)} messages from {session.path.name})")
+    if token or host not in ("127.0.0.1", "localhost"):
+        _install_basic_auth(token or "miniagent")  # non-localhost without token: safe default
     print(f"miniagent GUI -> http://{host}:{port}   (Ctrl+C to stop)")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
